@@ -1,0 +1,17 @@
+# Build artifacts
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+/telegram_tdlib-*.tar
+
+# Compiled native shim
+/priv/telegram_tdlib_shim
+
+# Local TDLib database / session state (created at runtime)
+/tdlib-db/
+/tmp/
