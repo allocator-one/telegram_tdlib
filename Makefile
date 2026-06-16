@@ -16,8 +16,10 @@ TDLIB_DIR ?= $(shell brew --prefix tdlib 2>/dev/null)
 TDJSON := $(wildcard $(TDLIB_DIR)/lib/libtdjson*)
 
 CXX ?= c++
-CXXFLAGS += -std=c++14 -O2 -Wall -Wextra -I$(TDLIB_DIR)/include
-LDFLAGS += -L$(TDLIB_DIR)/lib -ltdjson -Wl,-rpath,$(TDLIB_DIR)/lib
+# TDLIB_DIR is quoted in every recipe so a path with spaces (or shell
+# metacharacters in a hostile build env) is treated as one literal argument.
+CXXFLAGS += -std=c++14 -O2 -Wall -Wextra -I"$(TDLIB_DIR)/include"
+LDFLAGS += -L"$(TDLIB_DIR)/lib" -ltdjson -Wl,-rpath,"$(TDLIB_DIR)/lib"
 
 .PHONY: all clean
 
@@ -31,9 +33,9 @@ else
 endif
 
 $(SHIM): c_src/telegram_tdlib_shim.cpp
-	@mkdir -p $(PRIV_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+	@mkdir -p "$(PRIV_DIR)"
+	$(CXX) $(CXXFLAGS) "$<" -o "$@" $(LDFLAGS)
 	@echo "telegram_tdlib: built shim -> $@"
 
 clean:
-	$(RM) $(SHIM)
+	$(RM) "$(SHIM)"

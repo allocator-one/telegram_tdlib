@@ -115,7 +115,7 @@ defmodule TelegramTdlib.ClientTest do
     task = Task.async(fn -> Client.request(client, "getMe", %{}, 2000) end)
     assert_receive {:sent, %{"@extra" => _token}}
     GenServer.stop(transport, :normal)
-    assert {:error, %{"reason" => "transport_down"}} = Task.await(task)
+    assert {:error, %{"@type" => "error", "message" => "transport_down"}} = Task.await(task)
     # The client then stops with the transport's exit reason, as documented.
     assert_receive {:DOWN, ^ref, :process, ^client, :normal}
   end
@@ -125,7 +125,7 @@ defmodule TelegramTdlib.ClientTest do
     assert_receive {:transport_up, _transport}
 
     # A short timeout proves the reply is immediate, not a timeout expiry.
-    assert {:error, %{"reason" => "transport_down"}} =
+    assert {:error, %{"@type" => "error", "message" => "transport_down"}} =
              Client.request(client, "getMe", %{}, 500)
   end
 

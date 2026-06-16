@@ -49,7 +49,9 @@ defmodule TelegramTdlib.Client do
   Options:
 
     * `:handler` — pid to receive `{:tdlib_update, map}` updates. Defaults to the
-      process calling `start_link/1`.
+      process calling `start_link/1`. The handler is monitored and **must
+      outlive the client**: when it dies the client stops. Pass an explicit
+      long-lived pid when the starting process is short-lived.
     * `:transport` — transport module (default `TelegramTdlib.Port`).
     * `:name` — optional GenServer name.
   """
@@ -69,13 +71,14 @@ defmodule TelegramTdlib.Client do
   """
   @spec request(GenServer.server(), String.t(), map(), timeout()) ::
           {:ok, map()} | {:error, map()}
-  def request(server, method, params \\ %{}, timeout \\ @default_timeout) do
+  def request(server, method, params \\ %{}, timeout \\ @default_timeout)
+      when is_map(params) do
     GenServer.call(server, {:request, method, params}, timeout)
   end
 
   @doc "Fire-and-forget a TDLib `method` with `params`."
   @spec cast(GenServer.server(), String.t(), map()) :: :ok
-  def cast(server, method, params \\ %{}) do
+  def cast(server, method, params \\ %{}) when is_map(params) do
     GenServer.cast(server, {:cast, method, params})
   end
 
@@ -105,9 +108,9 @@ defmodule TelegramTdlib.Client do
            handler: handler,
            pending: %{},
            seq: 0,
-           # Per-instance random prefix so correlation tokens are unique across
-           # restarts — a stale response from a previous incarnation (TDLib's DB
-           # is persisted) can't be mismatched to a new caller's req-N token.
+           # Per-instance random prefix so correlation tokens are globally
+           # unique (across client instances and restarts), keeping aggregated
+           # logs unambiguous rather than every client starting at req-0.
            prefix: Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
          }}
 
@@ -170,16 +173,11 @@ defmodule TelegramTdlib.Client do
     {:stop, reason, %{state | pending: %{}}}
   end
 
-  # A benign exit from some other linked process is ignored — only the
-  # transport (above) and the monitored handler (below) drive shutdown.
-  def handle_info({:EXIT, _pid, :normal}, state) do
+  # Only the transport (above) and the monitored handler (below) drive shutdown.
+  # The parent's exit is intercepted by gen_server itself; any other incidental
+  # linked process is ignored so it can't take the client down unexpectedly.
+  def handle_info({:EXIT, _pid, _reason}, state) do
     {:noreply, state}
-  end
-
-  # Any other linked process exiting abnormally takes the client with it;
-  # in-flight callers are drained by terminate/2.
-  def handle_info({:EXIT, _pid, reason}, state) do
-    {:stop, reason, state}
   end
 
   # The monitored handler died — there is no one left to serve. A graceful
@@ -223,8 +221,10 @@ defmodule TelegramTdlib.Client do
     Enum.each(pending, fn {_token, from} -> GenServer.reply(from, reply) end)
   end
 
+  # Synthetic error mirroring TDLib's error object shape (code + message) so
+  # callers can pattern-match transport failures the same way as TDLib errors.
   defp transport_down_error,
-    do: {:error, %{"@type" => "error", "reason" => "transport_down"}}
+    do: {:error, %{"@type" => "error", "code" => 0, "message" => "transport_down"}}
 
   defp dispatch_update(msg, %{handler: handler}) when is_pid(handler) do
     Kernel.send(handler, {:tdlib_update, msg})
