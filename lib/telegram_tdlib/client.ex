@@ -87,35 +87,47 @@ defmodule TelegramTdlib.Client do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-    handler = Keyword.fetch!(opts, :handler)
-    # The client exists to serve its handler; if the handler dies, stop too
-    # (a supervisor can restart with a fresh handler) rather than silently
-    # dropping updates onto a dead pid.
-    if is_pid(handler), do: Process.monitor(handler)
-    transport = Keyword.get(opts, :transport, TelegramTdlib.Port)
 
-    transport_opts =
-      opts
-      |> Keyword.drop([:name, :transport, :handler])
-      |> Keyword.put(:owner, self())
+    # Resolve the handler (pid, registered name, or :via/:global) to a pid so
+    # updates and monitoring work uniformly. The client exists to serve its
+    # handler; if the handler dies, stop too rather than dropping updates onto a
+    # dead process.
+    with {:ok, handler} <- resolve_handler(Keyword.fetch!(opts, :handler)) do
+      Process.monitor(handler)
+      transport = Keyword.get(opts, :transport, TelegramTdlib.Port)
 
-    case transport.start_link(transport_opts) do
-      {:ok, port} ->
-        {:ok,
-         %{
-           transport: transport,
-           port: port,
-           handler: handler,
-           pending: %{},
-           seq: 0,
-           # Per-instance random prefix so correlation tokens are globally
-           # unique (across client instances and restarts), keeping aggregated
-           # logs unambiguous rather than every client starting at req-0.
-           prefix: Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
-         }}
+      transport_opts =
+        opts
+        |> Keyword.drop([:name, :transport, :handler])
+        |> Keyword.put(:owner, self())
 
-      {:error, reason} ->
-        {:stop, reason}
+      case transport.start_link(transport_opts) do
+        {:ok, port} ->
+          {:ok,
+           %{
+             transport: transport,
+             port: port,
+             handler: handler,
+             pending: %{},
+             seq: 0,
+             # Per-instance random prefix so correlation tokens are globally
+             # unique (across client instances and restarts), keeping aggregated
+             # logs unambiguous rather than every client starting at req-0.
+             prefix: Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+           }}
+
+        {:error, reason} ->
+          {:stop, reason}
+      end
+    else
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp resolve_handler(handler) do
+    case GenServer.whereis(handler) do
+      pid when is_pid(pid) -> {:ok, pid}
+      _ -> {:error, {:handler_not_found, handler}}
     end
   end
 
@@ -137,7 +149,11 @@ defmodule TelegramTdlib.Client do
 
   @impl true
   def handle_cast({:cast, method, params}, state) do
-    _ = safe_send(state, build(method, params, nil))
+    case safe_send(state, build(method, params, nil)) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("telegram_tdlib: cast send failed: #{inspect(reason)}")
+    end
+
     {:noreply, state}
   end
 
@@ -193,16 +209,21 @@ defmodule TelegramTdlib.Client do
 
   @impl true
   def terminate(_reason, state) do
+    # Drains any callers not already replied to. On the transport-exit path
+    # `pending` was cleared before stopping, so this is a no-op there.
     reply_all_pending(state.pending, transport_down_error())
     :ok
   end
 
   # ---- helpers ----
 
-  # Sends via the transport, treating a dead-transport exit as a send failure
-  # (the linked-process {:EXIT, ...} that follows handles draining `pending`).
+  # Sends via the transport, isolating Client from transport failures: a
+  # dead-transport exit (or any raise from a misbehaving transport) becomes a
+  # send error. The linked-process {:EXIT, ...} that follows drains `pending`.
   defp safe_send(state, request) do
     state.transport.send(state.port, request)
+  rescue
+    e -> {:error, {:send_error, e}}
   catch
     :exit, _ -> {:error, :transport_down}
   end
@@ -226,11 +247,8 @@ defmodule TelegramTdlib.Client do
   defp transport_down_error,
     do: {:error, %{"@type" => "error", "code" => 0, "message" => "transport_down"}}
 
-  defp dispatch_update(msg, %{handler: handler}) when is_pid(handler) do
+  defp dispatch_update(msg, %{handler: handler}) do
+    # handler is always a resolved pid (see resolve_handler/1).
     Kernel.send(handler, {:tdlib_update, msg})
-  end
-
-  defp dispatch_update(msg, _state) do
-    Logger.debug("telegram_tdlib update: #{inspect(msg)}")
   end
 end

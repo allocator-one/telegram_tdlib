@@ -107,6 +107,42 @@ defmodule TelegramTdlib.ClientTest do
     refute Map.has_key?(request, "@extra")
   end
 
+  test "caller-supplied @type/@extra in params cannot shadow the method or token", %{
+    client: client
+  } do
+    task =
+      Task.async(fn ->
+        Client.request(client, "getMe", %{"@type" => "evil", "@extra" => "collision"})
+      end)
+
+    assert_receive {:sent, %{"@type" => "getMe", "@extra" => token}}
+    refute token == "collision"
+    Kernel.send(client, {:tdlib, %{"@type" => "user", "@extra" => token}})
+    assert {:ok, %{"@type" => "user"}} = Task.await(task)
+  end
+
+  @tag :capture_log
+  test "the client terminates when its start_link parent dies (gen_server semantics)" do
+    test = self()
+
+    parent =
+      spawn(fn ->
+        {:ok, client} =
+          Client.start_link(transport: FakeTransport, test_pid: test, handler: test)
+
+        Kernel.send(test, {:client_started, client})
+        receive(do: (_ -> :ok))
+      end)
+
+    assert_receive {:transport_up, _transport}
+    assert_receive {:client_started, client}
+    ref = Process.monitor(client)
+    Process.exit(parent, :kill)
+    # gen_server intercepts the parent's exit and terminates, even though the
+    # client traps exits and ignores other incidental linked exits.
+    assert_receive {:DOWN, ^ref, :process, ^client, _reason}
+  end
+
   test "in-flight requests get an error reply when the transport goes down", %{
     client: client,
     transport: transport

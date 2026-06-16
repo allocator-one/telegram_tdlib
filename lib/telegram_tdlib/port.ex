@@ -53,7 +53,14 @@ defmodule TelegramTdlib.Port do
 
     case shim_path() do
       {:ok, path} ->
-        port = Port.open({:spawn_executable, path}, [:binary, :exit_status, {:packet, 4}])
+        port =
+          Port.open({:spawn_executable, path}, [
+            :binary,
+            :use_stdio,
+            :exit_status,
+            {:packet, 4}
+          ])
+
         {:ok, %{port: port, owner: owner}}
 
       {:error, reason} ->

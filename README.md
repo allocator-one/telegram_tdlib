@@ -39,8 +39,9 @@ sanctioned integration path.
     provides `libtdjson`.
 
 If `libtdjson` is not found, the native build is **skipped** (not failed) so the
-pure-Elixir code and tests still compile; the client raises a clear error if you
-try to use it without the shim.
+pure-Elixir code and tests still compile. In that state `TelegramTdlib.start_link/1`
+fails fast with a clear `{:error, reason}` (the shim is missing) rather than
+starting a half-working client.
 
 ## Installation
 
@@ -66,17 +67,25 @@ application to Telegram and are required by `setTdlibParameters`.
 ## Usage
 
 ```elixir
-# Start a client; updates are delivered to the calling process by default.
+# Start a client; updates go to the calling process by default. Pass a
+# long-lived `handler:` pid when the starting process is short-lived.
 {:ok, client} = TelegramTdlib.start_link(handler: self())
 
-# Synchronous, no network — proves the bridge works:
-{:ok, %{"value" => version}} =
-  TelegramTdlib.request(client, "getOption", %{"name" => "version"})
+# Synchronous, no network — proves the bridge works. getAuthorizationState is
+# answered locally and echoes the correlation token.
+{:ok, %{"@type" => "authorizationState" <> _}} =
+  TelegramTdlib.request(client, "getAuthorizationState")
+
+# Source credentials from config/env — never hardcode them.
+config = %{
+  api_id: String.to_integer(System.fetch_env!("TELEGRAM_API_ID")),
+  api_hash: System.fetch_env!("TELEGRAM_API_HASH")
+}
 
 # TDLib announces auth steps via updates; respond with TelegramTdlib.Auth:
 receive do
   {:tdlib_update, %{"@type" => "updateAuthorizationState", "authorization_state" => st}} ->
-    case TelegramTdlib.Auth.next_action(st, %{api_id: 12345, api_hash: "..."}) do
+    case TelegramTdlib.Auth.next_action(st, config) do
       {:request, req} -> TelegramTdlib.cast(client, req["@type"], Map.delete(req, "@type"))
       {:need, :phone_number} -> # prompt the user, then send Auth.phone_request/1
       :ready -> IO.puts("logged in")
