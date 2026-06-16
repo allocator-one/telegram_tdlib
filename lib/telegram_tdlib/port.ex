@@ -9,6 +9,9 @@ defmodule TelegramTdlib.Port do
 
   Framing uses the port's `{:packet, 4}` option: a 4-byte big-endian length
   prefix on every message in both directions, matching the C shim.
+
+  The process is linked to its owner; if the shim exits the server stops with
+  `{:shim_exited, status}`, which (via the link) the owner observes.
   """
   use GenServer
   require Logger
@@ -41,21 +44,35 @@ defmodule TelegramTdlib.Port do
   @impl true
   def init(opts) do
     owner = Keyword.fetch!(opts, :owner)
-    Process.flag(:trap_exit, true)
 
-    port =
-      Port.open({:spawn_executable, shim_path()}, [
-        :binary,
-        :exit_status,
-        {:packet, 4}
-      ])
+    case shim_path() do
+      {:ok, path} ->
+        port = Port.open({:spawn_executable, path}, [:binary, :exit_status, {:packet, 4}])
+        {:ok, %{port: port, owner: owner}}
 
-    {:ok, %{port: port, owner: owner}}
+      {:error, reason} ->
+        Logger.error("""
+        telegram_tdlib: cannot start the TDLib shim (#{inspect(reason)}).
+
+        The native build is skipped when libtdjson is not found at compile time.
+        Install TDLib (e.g. `brew install tdlib`, or build from
+        https://github.com/tdlib/td) and recompile this dependency.
+        """)
+
+        {:stop, reason}
+    end
   end
 
   @impl true
   def handle_cast({:send, request}, state) do
-    Port.command(state.port, Jason.encode!(request))
+    case Jason.encode(request) do
+      {:ok, payload} ->
+        Port.command(state.port, payload)
+
+      {:error, reason} ->
+        Logger.error("telegram_tdlib: dropping un-encodable request: #{inspect(reason)}")
+    end
+
     {:noreply, state}
   end
 
@@ -76,25 +93,19 @@ defmodule TelegramTdlib.Port do
     {:stop, {:shim_exited, status}, state}
   end
 
-  def handle_info({:EXIT, port, reason}, %{port: port} = state) do
-    {:stop, {:shim_down, reason}, state}
-  end
-
   # ---- helpers ----
 
   defp shim_path do
-    path = Path.join(:code.priv_dir(:telegram_tdlib), @shim)
+    case :code.priv_dir(:telegram_tdlib) do
+      {:error, _} ->
+        {:error, :telegram_tdlib_app_not_loaded}
 
-    unless File.exists?(path) do
-      raise """
-      telegram_tdlib shim not found at #{path}.
+      priv ->
+        path = Path.join(priv, @shim)
 
-      The native build was skipped because TDLib (libtdjson) was not found at
-      compile time. Install TDLib (e.g. `brew install tdlib`, or build from
-      https://github.com/tdlib/td) and recompile this dependency.
-      """
+        if File.exists?(path),
+          do: {:ok, String.to_charlist(path)},
+          else: {:error, {:shim_missing, path}}
     end
-
-    String.to_charlist(path)
   end
 end

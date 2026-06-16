@@ -31,9 +31,10 @@ defmodule TelegramTdlib do
   def start_link(opts \\ []), do: Client.start_link(opts)
 
   @doc "Send a TDLib method and await its response."
-  @spec request(GenServer.server(), String.t(), map()) ::
+  @spec request(GenServer.server(), String.t(), map(), timeout()) ::
           {:ok, map()} | {:error, map()}
-  def request(client, method, params \\ %{}), do: Client.request(client, method, params)
+  def request(client, method, params \\ %{}, timeout \\ 10_000),
+    do: Client.request(client, method, params, timeout)
 
   @doc "Fire-and-forget a TDLib method."
   @spec cast(GenServer.server(), String.t(), map()) :: :ok

@@ -18,6 +18,10 @@ defmodule TelegramTdlib.Auth do
   number, login code, and 2FA password.
   """
 
+  # Captured at compile time so the version reported to TDLib tracks the
+  # package version without a manual edit here.
+  @version Mix.Project.config()[:version] || "0.0.0"
+
   @type config :: %{
           required(:api_id) => integer(),
           required(:api_hash) => String.t(),
@@ -29,7 +33,7 @@ defmodule TelegramTdlib.Auth do
           {:request, map()}
           | {:need, :phone_number | :code | :password}
           | :ready
-          | {:unhandled, String.t()}
+          | {:unhandled, String.t() | nil}
 
   @doc """
   Map an `authorizationState` map (TDLib `@type`) plus `config` to the next step.
@@ -53,7 +57,7 @@ defmodule TelegramTdlib.Auth do
        "use_test_dc" => Map.get(config, :use_test_dc, false),
        "system_language_code" => "en",
        "device_model" => "telegram_tdlib",
-       "application_version" => "0.1.0"
+       "application_version" => @version
      }}
   end
 
@@ -71,6 +75,10 @@ defmodule TelegramTdlib.Auth do
 
   def next_action(%{"@type" => other}, _config),
     do: {:unhandled, other}
+
+  # Malformed input (no "@type", or not a map) — report rather than raise.
+  def next_action(_state, _config),
+    do: {:unhandled, nil}
 
   @doc "Build the request submitting a phone number."
   @spec phone_request(String.t()) :: map()

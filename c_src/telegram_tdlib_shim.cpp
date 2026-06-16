@@ -25,6 +25,11 @@
 
 namespace {
 
+// Upper bound on a single frame. TDLib's JSON payloads are far smaller; this is
+// a defense-in-depth cap so a malformed length prefix can't drive an arbitrary
+// allocation or desync the stream.
+const uint32_t MAX_FRAME_BYTES = 64u * 1024u * 1024u;  // 64 MiB
+
 std::atomic<bool> g_running{true};
 
 bool read_exact(int fd, char *buf, size_t n) {
@@ -68,6 +73,7 @@ void write_be32(unsigned char *p, uint32_t v) {
 
 // Frame a payload onto stdout. Only the main thread calls this.
 bool send_frame(const char *data, size_t len) {
+  if (len > MAX_FRAME_BYTES) return false;  // would corrupt the 4-byte header
   unsigned char header[4];
   write_be32(header, static_cast<uint32_t>(len));
   if (!write_exact(STDOUT_FILENO, reinterpret_cast<const char *>(header), 4)) return false;
@@ -81,9 +87,10 @@ void reader_loop(int client_id) {
   while (g_running.load()) {
     if (!read_exact(STDIN_FILENO, reinterpret_cast<char *>(header), 4)) break;
     uint32_t len = read_be32(header);
-    buf.assign(len, '\0');
+    if (len > MAX_FRAME_BYTES) break;  // reject implausible frame, don't allocate
+    buf.resize(len);
     if (len > 0 && !read_exact(STDIN_FILENO, &buf[0], len)) break;
-    buf.push_back('\0');  // NUL-terminate for td_send's C-string argument
+    // std::string::c_str() is NUL-terminated, so no manual terminator is needed.
     td_send(client_id, buf.c_str());
   }
   g_running.store(false);

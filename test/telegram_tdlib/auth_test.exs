@@ -45,6 +45,10 @@ defmodule TelegramTdlib.AuthTest do
       assert {:unhandled, "authorizationStateClosing"} =
                Auth.next_action(%{"@type" => "authorizationStateClosing"}, @config)
     end
+
+    test "a map without an @type key is reported as unhandled rather than raising" do
+      assert {:unhandled, nil} = Auth.next_action(%{"foo" => "bar"}, @config)
+    end
   end
 
   describe "request builders" do

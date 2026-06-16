@@ -1,6 +1,7 @@
 defmodule TelegramTdlib.Client do
   @moduledoc """
-  A `GenServer` owning a single TDLib client (via `TelegramTdlib.Port`).
+  A `GenServer` owning a single TDLib client (via a transport, by default
+  `TelegramTdlib.Port`).
 
   Provides:
 
@@ -9,18 +10,36 @@ defmodule TelegramTdlib.Client do
       request and matched against the `@extra` echoed on the response.
     * `cast/3` — fire-and-forget a TDLib method.
     * update delivery — every unsolicited TDLib update (no matching pending
-      request) is sent to the configured `:handler` pid as `{:tdlib_update, map}`,
-      or logged at debug level when no handler is set.
+      request) is sent to the `:handler` pid as `{:tdlib_update, map}`.
 
-  This is a thin, schema-agnostic layer: methods are TDLib `@type` strings and
-  params/responses are plain maps with string keys.
+  Methods are TDLib `@type` strings; params/responses are plain maps with string
+  keys.
+
+  ## Lifecycle
+
+  The transport is started linked. `Client` traps exits so that if the transport
+  (and thus the external shim) dies, every in-flight `request/4` caller receives
+  a prompt `{:error, ...}` reply instead of blocking until its own timeout, and
+  the client then stops with the transport's exit reason. Supervise `Client` to
+  recover.
+
+  ## Transport injection
+
+  `:transport` defaults to `TelegramTdlib.Port`. Any module implementing
+  `start_link/1` (accepting `:owner`) and `send/2` can be supplied — used by the
+  test suite to exercise correlation without a real TDLib process. Options other
+  than `:name`, `:transport`, and `:handler` are passed through to the
+  transport's `start_link/1`.
   """
   use GenServer
   require Logger
 
-  alias TelegramTdlib.Port
-
   @default_timeout 10_000
+
+  # The shim emits one internal bootstrap request to start TDLib's update loop;
+  # its response carries this token and is neither an application reply nor an
+  # update, so it is dropped.
+  @bootstrap_token "bootstrap"
 
   # ---- API ----
 
@@ -29,20 +48,24 @@ defmodule TelegramTdlib.Client do
 
   Options:
 
-    * `:handler` — pid to receive `{:tdlib_update, map}` updates (defaults to
-      the starting process).
+    * `:handler` — pid to receive `{:tdlib_update, map}` updates. Defaults to the
+      process calling `start_link/1`.
+    * `:transport` — transport module (default `TelegramTdlib.Port`).
     * `:name` — optional GenServer name.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
+    # Resolve the handler to the CALLER's pid here, before the GenServer is
+    # spawned — inside init/1, self() would be the GenServer itself.
+    opts = Keyword.put_new(opts, :handler, self())
     GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
   end
 
   @doc """
   Send a TDLib `method` (its `@type`) with `params` and await the response.
 
-  Returns `{:ok, response_map}`, or `{:error, error_map}` when TDLib replies
-  with an `error` object.
+  Returns `{:ok, response_map}`, or `{:error, error_map}` when TDLib replies with
+  an `error` object or the transport goes down with the request in flight.
   """
   @spec request(GenServer.server(), String.t(), map(), timeout()) ::
           {:ok, map()} | {:error, map()}
@@ -60,27 +83,43 @@ defmodule TelegramTdlib.Client do
 
   @impl true
   def init(opts) do
-    handler = Keyword.get(opts, :handler, self())
-    {:ok, port} = Port.start_link(owner: self())
+    Process.flag(:trap_exit, true)
+    handler = Keyword.fetch!(opts, :handler)
+    transport = Keyword.get(opts, :transport, TelegramTdlib.Port)
 
-    {:ok, %{port: port, handler: handler, pending: %{}, seq: 0}}
+    transport_opts =
+      opts
+      |> Keyword.drop([:name, :transport, :handler])
+      |> Keyword.put(:owner, self())
+
+    case transport.start_link(transport_opts) do
+      {:ok, port} ->
+        {:ok, %{transport: transport, port: port, handler: handler, pending: %{}, seq: 0}}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   @impl true
   def handle_call({:request, method, params}, from, state) do
     token = "req-" <> Integer.to_string(state.seq)
-    Port.send(state.port, build(method, params, token))
+    state.transport.send(state.port, build(method, params, token))
 
     {:noreply, %{state | seq: state.seq + 1, pending: Map.put(state.pending, token, from)}}
   end
 
   @impl true
   def handle_cast({:cast, method, params}, state) do
-    Port.send(state.port, build(method, params, nil))
+    state.transport.send(state.port, build(method, params, nil))
     {:noreply, state}
   end
 
   @impl true
+  def handle_info({:tdlib, %{"@extra" => @bootstrap_token}}, state) do
+    {:noreply, state}
+  end
+
   def handle_info({:tdlib, %{"@extra" => token} = msg}, state) do
     case Map.pop(state.pending, token) do
       {nil, _pending} ->
@@ -98,6 +137,23 @@ defmodule TelegramTdlib.Client do
     {:noreply, state}
   end
 
+  # The linked transport (and thus the shim) died: fail in-flight requests now.
+  def handle_info({:EXIT, port, reason}, %{port: port} = state) do
+    reply_all_pending(state.pending, transport_down_error())
+    {:stop, reason, %{state | pending: %{}}}
+  end
+
+  # Any other linked process (e.g. the owner) exiting takes the client with it.
+  def handle_info({:EXIT, _pid, reason}, state) do
+    {:stop, reason, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    reply_all_pending(state.pending, transport_down_error())
+    :ok
+  end
+
   # ---- helpers ----
 
   defp build(method, params, token) do
@@ -107,6 +163,13 @@ defmodule TelegramTdlib.Client do
 
   defp classify(%{"@type" => "error"} = err), do: {:error, err}
   defp classify(msg), do: {:ok, msg}
+
+  defp reply_all_pending(pending, reply) do
+    Enum.each(pending, fn {_token, from} -> GenServer.reply(from, reply) end)
+  end
+
+  defp transport_down_error,
+    do: {:error, %{"@type" => "error", "reason" => "transport_down"}}
 
   defp dispatch_update(msg, %{handler: handler}) when is_pid(handler) do
     Kernel.send(handler, {:tdlib_update, msg})
