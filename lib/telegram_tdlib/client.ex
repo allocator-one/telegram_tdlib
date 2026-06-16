@@ -85,6 +85,10 @@ defmodule TelegramTdlib.Client do
   def init(opts) do
     Process.flag(:trap_exit, true)
     handler = Keyword.fetch!(opts, :handler)
+    # The client exists to serve its handler; if the handler dies, stop too
+    # (a supervisor can restart with a fresh handler) rather than silently
+    # dropping updates onto a dead pid.
+    if is_pid(handler), do: Process.monitor(handler)
     transport = Keyword.get(opts, :transport, TelegramTdlib.Port)
 
     transport_opts =
@@ -121,13 +125,17 @@ defmodule TelegramTdlib.Client do
   end
 
   def handle_info({:tdlib, %{"@extra" => token} = msg}, state) do
+    # @extra is our internal correlation token; strip it before it reaches
+    # callers or the handler.
+    clean = Map.delete(msg, "@extra")
+
     case Map.pop(state.pending, token) do
       {nil, _pending} ->
-        dispatch_update(msg, state)
+        dispatch_update(clean, state)
         {:noreply, state}
 
       {from, pending} ->
-        GenServer.reply(from, classify(msg))
+        GenServer.reply(from, classify(clean))
         {:noreply, %{state | pending: pending}}
     end
   end
@@ -148,6 +156,11 @@ defmodule TelegramTdlib.Client do
     {:stop, reason, state}
   end
 
+  # The monitored handler died — there is no one left to serve.
+  def handle_info({:DOWN, _ref, :process, handler, reason}, %{handler: handler} = state) do
+    {:stop, reason, state}
+  end
+
   @impl true
   def terminate(_reason, state) do
     reply_all_pending(state.pending, transport_down_error())
@@ -157,7 +170,9 @@ defmodule TelegramTdlib.Client do
   # ---- helpers ----
 
   defp build(method, params, token) do
-    base = params |> Map.new() |> Map.put("@type", method)
+    # Drop any caller-supplied @type/@extra so they can't shadow the method or
+    # collide with our correlation token.
+    base = params |> Map.new() |> Map.drop(["@type", "@extra"]) |> Map.put("@type", method)
     if token, do: Map.put(base, "@extra", token), else: base
   end
 

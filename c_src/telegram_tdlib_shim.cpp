@@ -117,7 +117,9 @@ int main() {
   }
 
   g_running.store(false);
-  // EOF on stdin (port closed) unblocks the reader; join it before exiting.
-  if (reader.joinable()) reader.join();
+  // The reader may still be blocked in read() on stdin (changing g_running does
+  // not interrupt a blocking read). Detaching rather than joining avoids a
+  // shutdown deadlock; the process is exiting, so the OS reclaims the thread.
+  reader.detach();
   return 0;
 }

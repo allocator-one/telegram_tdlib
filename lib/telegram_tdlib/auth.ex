@@ -18,10 +18,6 @@ defmodule TelegramTdlib.Auth do
   number, login code, and 2FA password.
   """
 
-  # Captured at compile time so the version reported to TDLib tracks the
-  # package version without a manual edit here.
-  @version Mix.Project.config()[:version] || "0.0.0"
-
   @type config :: %{
           required(:api_id) => integer(),
           required(:api_hash) => String.t(),
@@ -55,9 +51,14 @@ defmodule TelegramTdlib.Auth do
        "api_hash" => Map.fetch!(config, :api_hash),
        "database_directory" => Map.get(config, :database_directory, "tdlib-db"),
        "use_test_dc" => Map.get(config, :use_test_dc, false),
+       "use_message_database" => true,
+       "use_file_database" => true,
+       "use_chat_info_database" => true,
+       "use_secret_chats" => false,
        "system_language_code" => "en",
        "device_model" => "telegram_tdlib",
-       "application_version" => @version
+       "system_version" => "unknown",
+       "application_version" => application_version()
      }}
   end
 
@@ -94,4 +95,13 @@ defmodule TelegramTdlib.Auth do
   @spec password_request(String.t()) :: map()
   def password_request(password),
     do: %{"@type" => "checkAuthenticationPassword", "password" => password}
+
+  # Reported to TDLib as the application version. Read from the loaded app spec
+  # at runtime to avoid referencing Mix (unavailable in releases) from library code.
+  defp application_version do
+    case Application.spec(:telegram_tdlib, :vsn) do
+      nil -> "0.0.0"
+      vsn -> List.to_string(vsn)
+    end
+  end
 end

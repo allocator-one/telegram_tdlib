@@ -42,11 +42,14 @@ defmodule TelegramTdlib.ClientTest do
   end
 
   describe "request/4 correlation" do
-    test "matches a response by @extra and returns {:ok, msg}", %{client: client} do
+    test "matches a response by @extra and returns {:ok, msg} with @extra stripped", %{
+      client: client
+    } do
       task = Task.async(fn -> Client.request(client, "getMe") end)
       assert_receive {:sent, %{"@type" => "getMe", "@extra" => token}}
       Kernel.send(client, {:tdlib, %{"@type" => "user", "id" => 7, "@extra" => token}})
-      assert {:ok, %{"@type" => "user", "id" => 7}} = Task.await(task)
+      assert {:ok, %{"@type" => "user", "id" => 7} = result} = Task.await(task)
+      refute Map.has_key?(result, "@extra")
     end
 
     test "classifies an error object as {:error, msg}", %{client: client} do
@@ -82,9 +85,12 @@ defmodule TelegramTdlib.ClientTest do
       assert_receive {:tdlib_update, %{"@type" => "updateNewMessage"}}
     end
 
-    test "a response with an unknown @extra is delivered as an update", %{client: client} do
+    test "a response with an unknown @extra is delivered as an update, @extra stripped", %{
+      client: client
+    } do
       Kernel.send(client, {:tdlib, %{"@type" => "user", "@extra" => "stale-token"}})
-      assert_receive {:tdlib_update, %{"@type" => "user", "@extra" => "stale-token"}}
+      assert_receive {:tdlib_update, %{"@type" => "user"} = update}
+      refute Map.has_key?(update, "@extra")
     end
 
     test "the shim bootstrap response is dropped, not surfaced", %{client: client} do
@@ -104,9 +110,12 @@ defmodule TelegramTdlib.ClientTest do
     client: client,
     transport: transport
   } do
+    ref = Process.monitor(client)
     task = Task.async(fn -> Client.request(client, "getMe", %{}, 2000) end)
     assert_receive {:sent, %{"@extra" => _token}}
     GenServer.stop(transport, :normal)
     assert {:error, %{"reason" => "transport_down"}} = Task.await(task)
+    # The client then stops with the transport's exit reason, as documented.
+    assert_receive {:DOWN, ^ref, :process, ^client, :normal}
   end
 end

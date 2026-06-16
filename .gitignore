@@ -15,3 +15,6 @@ erl_crash.dump
 # Local TDLib database / session state (created at runtime)
 /tdlib-db/
 /tmp/
+
+# Local toolchain pin — not forced on contributors (mix.exs declares the requirement)
+.tool-versions
