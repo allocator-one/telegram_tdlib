@@ -128,4 +128,20 @@ defmodule TelegramTdlib.ClientTest do
     assert {:error, %{"reason" => "transport_down"}} =
              Client.request(client, "getMe", %{}, 500)
   end
+
+  @tag :capture_log
+  test "the client stops (tagged) when its handler process dies" do
+    handler = spawn(fn -> receive(do: (_ -> :ok)) end)
+
+    {:ok, client} =
+      Client.start_link(transport: FakeTransport, test_pid: self(), handler: handler)
+
+    # Unlink so the client's abnormal exit doesn't take the test down with it.
+    Process.unlink(client)
+    assert_receive {:transport_up, _transport}
+
+    ref = Process.monitor(client)
+    Process.exit(handler, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^client, {:handler_down, :killed}}
+  end
 end

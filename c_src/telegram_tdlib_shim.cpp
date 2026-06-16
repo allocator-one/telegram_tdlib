@@ -87,9 +87,10 @@ void reader_loop(int client_id) {
   while (g_running.load()) {
     if (!read_exact(STDIN_FILENO, reinterpret_cast<char *>(header), 4)) break;
     uint32_t len = read_be32(header);
+    if (len == 0) continue;            // skip empty frames; not a valid request
     if (len > MAX_FRAME_BYTES) break;  // reject implausible frame, don't allocate
     buf.resize(len);
-    if (len > 0 && !read_exact(STDIN_FILENO, &buf[0], len)) break;
+    if (!read_exact(STDIN_FILENO, &buf[0], len)) break;
     // std::string::c_str() is NUL-terminated, so no manual terminator is needed.
     td_send(client_id, buf.c_str());
   }

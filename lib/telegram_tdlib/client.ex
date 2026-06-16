@@ -98,7 +98,18 @@ defmodule TelegramTdlib.Client do
 
     case transport.start_link(transport_opts) do
       {:ok, port} ->
-        {:ok, %{transport: transport, port: port, handler: handler, pending: %{}, seq: 0}}
+        {:ok,
+         %{
+           transport: transport,
+           port: port,
+           handler: handler,
+           pending: %{},
+           seq: 0,
+           # Per-instance random prefix so correlation tokens are unique across
+           # restarts — a stale response from a previous incarnation (TDLib's DB
+           # is persisted) can't be mismatched to a new caller's req-N token.
+           prefix: Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+         }}
 
       {:error, reason} ->
         {:stop, reason}
@@ -107,7 +118,7 @@ defmodule TelegramTdlib.Client do
 
   @impl true
   def handle_call({:request, method, params}, from, state) do
-    token = "req-" <> Integer.to_string(state.seq)
+    token = state.prefix <> "-" <> Integer.to_string(state.seq)
     state = %{state | seq: state.seq + 1}
 
     case safe_send(state, build(method, params, token)) do
@@ -159,15 +170,27 @@ defmodule TelegramTdlib.Client do
     {:stop, reason, %{state | pending: %{}}}
   end
 
-  # Any other linked process exiting takes the client with it; in-flight callers
-  # are drained by terminate/2.
+  # A benign exit from some other linked process is ignored — only the
+  # transport (above) and the monitored handler (below) drive shutdown.
+  def handle_info({:EXIT, _pid, :normal}, state) do
+    {:noreply, state}
+  end
+
+  # Any other linked process exiting abnormally takes the client with it;
+  # in-flight callers are drained by terminate/2.
   def handle_info({:EXIT, _pid, reason}, state) do
     {:stop, reason, state}
   end
 
-  # The monitored handler died — there is no one left to serve.
+  # The monitored handler died — there is no one left to serve. A graceful
+  # handler exit stops the client gracefully; an abnormal one is tagged so it
+  # stays distinguishable in crash logs and supervisor decisions.
+  def handle_info({:DOWN, _ref, :process, handler, :normal}, %{handler: handler} = state) do
+    {:stop, :normal, state}
+  end
+
   def handle_info({:DOWN, _ref, :process, handler, reason}, %{handler: handler} = state) do
-    {:stop, reason, state}
+    {:stop, {:handler_down, reason}, state}
   end
 
   @impl true
