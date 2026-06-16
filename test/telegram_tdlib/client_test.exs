@@ -9,9 +9,12 @@ defmodule TelegramTdlib.ClientTest.FakeTransport do
   tests can stop it.
   """
   use GenServer
+  @behaviour TelegramTdlib.Transport
 
+  @impl TelegramTdlib.Transport
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
+  @impl TelegramTdlib.Transport
   def send(server, %{} = request), do: GenServer.call(server, {:send, request})
 
   @impl true

@@ -14,6 +14,7 @@ defmodule TelegramTdlib.Port do
   `{:shim_exited, status}`, which (via the link) the owner observes.
   """
   use GenServer
+  @behaviour TelegramTdlib.Transport
   require Logger
 
   @shim "telegram_tdlib_shim"
@@ -28,6 +29,7 @@ defmodule TelegramTdlib.Port do
     * `:owner` (required) — pid that receives `{:tdlib, map}` messages.
     * `:name` — optional GenServer name.
   """
+  @impl TelegramTdlib.Transport
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
@@ -40,6 +42,7 @@ defmodule TelegramTdlib.Port do
   returns `:ok`, or `{:error, reason}` if the request could not be encoded or the
   port is already closed.
   """
+  @impl TelegramTdlib.Transport
   @spec send(GenServer.server(), map()) :: :ok | {:error, term()}
   def send(server, %{} = request) do
     GenServer.call(server, {:send, request})
@@ -98,8 +101,11 @@ defmodule TelegramTdlib.Port do
   @impl true
   def handle_info({port, {:data, data}}, %{port: port} = state) do
     case Jason.decode(data) do
-      {:ok, msg} ->
+      {:ok, %{} = msg} ->
         Kernel.send(state.owner, {:tdlib, msg})
+
+      {:ok, other} ->
+        Logger.error("telegram_tdlib: ignoring non-object TDLib payload: #{inspect(other)}")
 
       {:error, reason} ->
         Logger.error("telegram_tdlib: could not decode TDLib message: #{inspect(reason)}")

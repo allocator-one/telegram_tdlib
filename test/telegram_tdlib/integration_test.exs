@@ -16,4 +16,9 @@ defmodule TelegramTdlib.IntegrationTest do
     assert {:ok, %{"@type" => "authorizationState" <> _}} =
              TelegramTdlib.request(client, "getAuthorizationState")
   end
+
+  test "Port.send/2 reports an encode error for a non-JSON-encodable request" do
+    {:ok, port} = TelegramTdlib.Port.start_link(owner: self())
+    assert {:error, {:encode_error, _}} = TelegramTdlib.Port.send(port, %{"bad" => {:a, :tuple}})
+  end
 end

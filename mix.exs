@@ -23,7 +23,9 @@ defmodule TelegramTdlib.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    # :crypto is used for per-client correlation-token prefixes and is not
+    # guaranteed to be started implicitly in releases.
+    [extra_applications: [:logger, :crypto]]
   end
 
   defp deps do
