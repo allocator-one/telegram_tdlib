@@ -12,19 +12,20 @@ defmodule TelegramTdlib.ClientTest.FakeTransport do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  def send(server, %{} = request), do: GenServer.cast(server, {:send, request})
+  def send(server, %{} = request), do: GenServer.call(server, {:send, request})
 
   @impl true
   def init(opts) do
     test = Keyword.fetch!(opts, :test_pid)
     Kernel.send(test, {:transport_up, self()})
-    {:ok, %{test: test}}
+    {:ok, %{test: test, fail_send: Keyword.get(opts, :fail_send, false)}}
   end
 
   @impl true
-  def handle_cast({:send, request}, state) do
+  def handle_call({:send, request}, _from, state) do
     Kernel.send(state.test, {:sent, request})
-    {:noreply, state}
+    reply = if state.fail_send, do: {:error, :boom}, else: :ok
+    {:reply, reply, state}
   end
 end
 
@@ -117,5 +118,14 @@ defmodule TelegramTdlib.ClientTest do
     assert {:error, %{"reason" => "transport_down"}} = Task.await(task)
     # The client then stops with the transport's exit reason, as documented.
     assert_receive {:DOWN, ^ref, :process, ^client, :normal}
+  end
+
+  test "a request fails fast (no hang) when the transport rejects the send" do
+    {:ok, client} = Client.start_link(transport: FakeTransport, test_pid: self(), fail_send: true)
+    assert_receive {:transport_up, _transport}
+
+    # A short timeout proves the reply is immediate, not a timeout expiry.
+    assert {:error, %{"reason" => "transport_down"}} =
+             Client.request(client, "getMe", %{}, 500)
   end
 end

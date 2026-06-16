@@ -33,10 +33,16 @@ defmodule TelegramTdlib.Port do
     GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
   end
 
-  @doc "Send a TDLib request (a plain map) to the underlying client."
-  @spec send(GenServer.server(), map()) :: :ok
+  @doc """
+  Send a TDLib request (a plain map) to the underlying client.
+
+  Synchronous so the caller learns whether the request was handed to the port:
+  returns `:ok`, or `{:error, reason}` if the request could not be encoded or the
+  port is already closed.
+  """
+  @spec send(GenServer.server(), map()) :: :ok | {:error, term()}
   def send(server, %{} = request) do
-    GenServer.cast(server, {:send, request})
+    GenServer.call(server, {:send, request})
   end
 
   # ---- Callbacks ----
@@ -64,16 +70,22 @@ defmodule TelegramTdlib.Port do
   end
 
   @impl true
-  def handle_cast({:send, request}, state) do
+  def handle_call({:send, request}, _from, state) do
+    {:reply, do_send(request, state.port), state}
+  end
+
+  defp do_send(request, port) do
     case Jason.encode(request) do
       {:ok, payload} ->
-        Port.command(state.port, payload)
+        try do
+          if Port.command(port, payload), do: :ok, else: {:error, :port_closed}
+        rescue
+          ArgumentError -> {:error, :port_closed}
+        end
 
       {:error, reason} ->
-        Logger.error("telegram_tdlib: dropping un-encodable request: #{inspect(reason)}")
+        {:error, {:encode_error, reason}}
     end
-
-    {:noreply, state}
   end
 
   @impl true

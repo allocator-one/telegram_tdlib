@@ -108,14 +108,22 @@ defmodule TelegramTdlib.Client do
   @impl true
   def handle_call({:request, method, params}, from, state) do
     token = "req-" <> Integer.to_string(state.seq)
-    state.transport.send(state.port, build(method, params, token))
+    state = %{state | seq: state.seq + 1}
 
-    {:noreply, %{state | seq: state.seq + 1, pending: Map.put(state.pending, token, from)}}
+    case safe_send(state, build(method, params, token)) do
+      :ok ->
+        # Only track the caller once the request was actually accepted, so a
+        # send failure fails fast instead of blocking until the call timeout.
+        {:noreply, %{state | pending: Map.put(state.pending, token, from)}}
+
+      {:error, _reason} ->
+        {:reply, transport_down_error(), state}
+    end
   end
 
   @impl true
   def handle_cast({:cast, method, params}, state) do
-    state.transport.send(state.port, build(method, params, nil))
+    _ = safe_send(state, build(method, params, nil))
     {:noreply, state}
   end
 
@@ -151,7 +159,8 @@ defmodule TelegramTdlib.Client do
     {:stop, reason, %{state | pending: %{}}}
   end
 
-  # Any other linked process (e.g. the owner) exiting takes the client with it.
+  # Any other linked process exiting takes the client with it; in-flight callers
+  # are drained by terminate/2.
   def handle_info({:EXIT, _pid, reason}, state) do
     {:stop, reason, state}
   end
@@ -168,6 +177,14 @@ defmodule TelegramTdlib.Client do
   end
 
   # ---- helpers ----
+
+  # Sends via the transport, treating a dead-transport exit as a send failure
+  # (the linked-process {:EXIT, ...} that follows handles draining `pending`).
+  defp safe_send(state, request) do
+    state.transport.send(state.port, request)
+  catch
+    :exit, _ -> {:error, :transport_down}
+  end
 
   defp build(method, params, token) do
     # Drop any caller-supplied @type/@extra so they can't shadow the method or
